@@ -1,0 +1,7 @@
+;$ID$
+name = Migration Control
+description = Drupal 7 custom module to assist in Fedora object migration.
+package = ICG Modules
+core = 7.x
+dependencies[] = repository_control
+files[] = migration_control.module

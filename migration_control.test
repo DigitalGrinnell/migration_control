@@ -1,0 +1,25 @@
+<?php
+
+/**
+ * @file
+ * Test file for icg_migration_control module.
+ */
+
+/**
+ * Default test case for the icg_migration_control module.
+ */
+class ICGMigrationControlTestCase extends DrupalWebTestCase {
+
+  public static function getInfo( ) {
+    return array(
+      'name' => 'ICG Migration Control',
+      'description' => 'Various tests on the icg_migration_control module.' ,
+      'group' => 'ICG Modules',
+    );
+  }
+
+  function setUp( ) {
+    parent::setUp( 'icg_migration_control' );
+  }
+
+}

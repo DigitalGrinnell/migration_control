@@ -1,0 +1,608 @@
+<?php
+// $Id$
+/* =============================================================================
+ * Module for control of Fedora migration in 
+ * Islandora/Fedora repositories like Digital.Grinnell.edu.
+ * @see http://digital.grinnell.edu
+ * 
+ * Authors:  Mark A. McFate
+ *
+ */
+
+/* -----------------------------------------------------------------------------
+ * Implements hook_init( ).
+ *
+ * Initialize the module.
+ */
+function migration_control_init( ) {
+  module_load_include( 'inc', 'repository_control' );
+  // module_load_include( 'inc', 'islandora', 'includes/derivatives' );
+  return;
+  }
+  
+/* -----------------------------------------------------------------------------
+ * Implement hook_help( ).
+ */
+function migration_control_help( $path, $arg ) {
+  if ( $path == 'admin/help#migration_control' ) {
+    return t( 'Migration Control allows a site admin to modify Fedora datastreams for purposes of migration.' );
+  }
+}  
+  
+/* -----------------------------------------------------------------------------
+ * Implements hook_form( ).
+ *
+ *  This function is designed to provide a form that can be called to help maintain
+ *  MODS or DC (Dublin Core) records.  
+ */
+function migration_control_main_form( $form, &$form_state ) {
+  
+  // The main form definition.
+  
+  if ( !isset( $form_state['storage']['confirm'] )) {
+    $form['output_file'] = array (
+      '#type'             => 'textfield',
+      '#title'            => t( 'Enter the name of a file to receive the process output.  Default is public://migration_output.txt.' ),
+      '#default_value'    => variable_get( 'mi_output_file', 'public://migration_output.txt' ),
+      '#size'             => 80,
+      '#maxlength'        => 80,
+    );
+    
+    $form['operation'] = array (
+      '#type'             => 'select',
+      '#title'            => t( 'Select the operation to be peformed.' ),
+      '#default_value'    => variable_get( 'mi_operation', 'REPORT' ),
+      '#options'          => array( 
+         'MIGRATE_PAGE' => t( ' MIGRATE_PAGE - Migrate one page of an exsiting book' ),
+         'MIGRATE_BOOK' => t( ' MIGRATE_BOOK - Migrate the primary object of an existing book' ),
+         'PROCESS_TIFF' => t( ' PROCESS_TIFF - Change the image/tif DS to have a DSID of OBJ' ),
+         'COPY_ONE_DS' => t( ' COPY_ONE_DS - Copy a single existing datastream to a new DSID ' ),
+      ),
+    );
+    $form['first'] = array (
+      '#type'             => 'textfield',
+      '#title'            => t( 'Enter the first PID number to process.' ),
+      '#default_value'    => variable_get( 'mi_first', '0' ),
+      '#size'             => 10,
+      '#maxlength'        => 10,
+    );
+    $form['last'] = array (
+      '#type'             => 'textfield',
+      '#title'            => t( 'Enter the last PID number to process.' ),
+      '#default_value'    => variable_get( 'mi_last', '10000' ),
+      '#size'             => 10,
+      '#maxlength'        => 10,
+    );
+    $form['verbose'] = array (
+      '#type'                => 'checkbox',
+      '#title'               => t( 'Check here if you want VERBOSE output.' ),
+      '#default_value'       => variable_get( 'mi_verbost', FALSE ),
+    );
+    $form['submit'] = array (
+      '#type'             => 'submit',
+      '#value'            => t( 'Submit' ),
+    );
+    
+    return $form;
+  
+  }
+  else  // The confirmation form.
+  {
+ 
+    $op = $form_state['values']['operation'];
+    $first = intval( $form_state['values']['first'] );
+    $last = intval( $form_state['values']['last'] );
+    $range = $last - $first + 1;
+    
+    if ( $op === "COPY_ONE_DS" ) {
+      $form['mi_copy_old'] = array (
+        '#type'             => 'textfield',
+        '#title'            => t( 'Enter the ID of the datastream (DSID) to copy.' ),
+        '#default_value'    => variable_get( 'mi_copy_old', '' ),
+        '#size'             => 60,
+        '#maxlength'        => 60,
+        );
+      $form['mi_copy_new'] = array (
+        '#type'             => 'textfield',
+        '#title'            => t( 'Enter the new datastream ID (DSID) for the copy.' ),
+        '#default_value'    => variable_get( 'mi_copy_new', '' ),
+        '#size'             => 60,
+        '#maxlength'        => 60,
+        );
+      }
+    
+    if ( $range == 1 )
+      return confirm_form( $form, t( 'Are you sure you want to %op&nbsp; one object\'s datastream?', 
+        array( '%op' => $op, '%range' => $range )), 
+        'migration_control', t( 'This action cannot be undone.' ), t( $op ), t( 'Cancel' ));
+    else
+      return confirm_form( $form, t( 'Are you sure you want to %op&nbsp; up to %range&nbsp; objects\' datastreams?', 
+        array( '%op' => $op, '%range' => $range )), 
+        'migration_control', t( 'This action cannot be undone.' ), t( $op ), t( 'Cancel' ));
+  }
+}
+
+
+/* -----------------------------------------------------------------------------
+ * Validation function for migration_control_main_form( ).
+ */
+function migration_control_main_form_validate( $form, &$form_state ) {
+  if ( !isset( $form_state['storage']['confirm'] )) {  
+    $first = intval( $form_state['values']['first'] );
+    $last = intval( $form_state['values']['last'] );
+    if ( $first > $last ) 
+      $output .= t( t( 'Object $first is greater than $last.' ), 'error' );
+  }
+  return;
+}
+
+/* -----------------------------------------------------------------------------
+ * Submit function for migration_control_main_form( ).
+ *
+ * The submit handler/function for our form.
+ */
+function migration_control_main_form_submit( $form, &$form_state ) {
+  
+  // If confirm is NOT set, this will cause the form to be rebuilt, entering the confirm part.
+  //
+  if ( !isset( $form_state['storage']['confirm'] )) {  
+    
+    $form_state['storage']['confirm'] = TRUE;
+    $form_state['storage']['original_form'] = $form_state['values'];
+    $form_state['rebuild'] = TRUE;
+    }
+  else  // Do real form submittal. 
+    {
+    drupal_set_message( t( 'The Migration Control Main Form has been submitted.' ));
+
+    $main = $form_state['storage']['original_form'];   // get controls from the main form
+    $secondary = $form_state['values'];                // get controls from the secondary form
+    
+    variable_set( 'mi_output_file', $main['output_file'] );
+    variable_set( 'mi_first', $main['first'] );
+    variable_set( 'mi_last', $main['last'] );
+    variable_set( 'mi_verbose', $main['verbose'] );
+    variable_set( 'mi_operation', $main['operation'] );
+    
+    if ( isset( $secondary['mi_copy_old'] )) {
+      variable_set( 'mi_copy_old', $secondary['mi_copy_old'] );
+      variable_set( 'mi_copy_new', $secondary['mi_copy_new'] );
+      }
+    migration_control_op( );
+  }
+  
+  return;
+}  
+
+  
+/* -----------------------------------------------------------------------------
+ * migration_control_op( );
+ * 
+ * Function to apply various operations to target object datastreams.
+ * 
+ */
+function migration_control_op( ) {
+  
+  $outPath = variable_get( 'mi_output_file' );
+  $first = variable_get( 'mi_first' );
+  $last = variable_get( 'mi_last' );
+  $verbose = variable_get( 'mi_verbose' );
+  $op = variable_get( 'mi_operation' );
+    
+  drupal_set_message( "Function migration_control_op called with OP of '$op'." );
+  drupal_set_message( "--Object limits are: First = $first, Last = $last " );
+  $vbtxt = ( $verbose ? "VERBOSE" : "" );
+  drupal_set_message( "--Output $vbtxt to file '$outPath'. " );
+    
+  // Run a SPARQL query against the Fedora repo to return all ACTIVE PIDs.
+  //    
+  $pids = array( );
+  if ( $pids = repository_control_sparql_query( )) {
+    $total = count( $pids );
+    drupal_set_message( "A SPARQL query of the Fedora repository returned $total ACTIVE objects." );
+    }
+  else {
+    $total = 0;
+    drupal_set_message( "SPARQL query in repository_control_sparql_query( ) returned an ERROR.", 'error' );
+  }
+	
+  if ( !$repo = repository_control_connect( )) {
+    drupal_set_message( 'Error in migration_control_op from repository_control_connect...no connection to Fedora!', 'error' );
+    return;
+  }
+
+  // Build an array of batch $operations. 
+  // Loop through all returned objects.  Get the namespace and PID number and proceed.
+  //
+  $namespace = variable_get( 'icg_object_namespace' );
+  $max = 0;
+
+  foreach ( $pids as $pidstr ) {
+    if ( $pidstr === '"subject"' || $pidstr === '' ) { continue; }  // skip the header pid and any blank lines 
+    $pidn = intval( $pidstr );
+    if ( !$pidn || $pidn < intval( $first ) || $pidn > intval( $last )) { continue; }     // skip any non-numeric PID or those below $first
+    $pid = $namespace.':'.$pidn;
+    $max++;
+    
+    // Add an $operation...
+    // $operations[] = array( <function name>, <array of arguments to pass to function> );
+    switch( $op ) {
+      case 'COPY_ONE_DS' :
+        $operations[ ] = array( 'migration_control_COPY_ONE_DS', array( $repo, $pid )); 
+        break;
+      case 'PROCESS_TIFF' :
+        $operations[ ] = array( 'migration_control_PROCESS_TIFF', array( $repo, $pid )); 
+        break;
+      case 'MIGRATE_PAGE' :
+        $operations[ ] = array( 'migration_control_MIGRATE_PAGE', array( $repo, $pid )); 
+        break;
+      case 'MIGRATE_BOOK' :
+        $operations[ ] = array( 'migration_control_MIGRATE_BOOK', array( $repo, $pid )); 
+        break;
+    }  // end of... switch( $op )
+  }  // end of... foreach ( $object_pids as $pid )
+  
+  // If there's nothing to do...report and return.
+  //
+  if ( $max < 1 ) {
+    drupal_set_message( "metadata_control_op fetched NO objects between $first and $last!  Noting to do here.", 'warning' );
+    return;
+  }
+
+  // Build the array of batch instructions and start processing. .
+  //
+  $batch = array(
+    'operations' => $operations,
+    'finished' => 'migration_control_op_batch_finished',
+    'title' => "Performing prescribed $op",
+    'init_message' => "Batch $op is starting.",
+    'error_message' => "Batch $op has encountered an error.",
+  );
+  
+  // Save the record and operation counts.
+  //
+  variable_set( 'mi_total_count', $total );
+  variable_set( 'mi_operations_count', count( $operations ));
+  
+  // Go batch!
+  //
+  batch_set( $batch );
+  batch_process( 'migration_control' );
+  
+  return;
+
+}  // end of... function migration_control_op
+
+ 
+/* -----------------------------------------------------------------------------
+ * migration_control_COPY_ONE_DS( );
+ * 
+ * Function to copy a single DS, identified by DSID, to a different DSID.
+ * Returns TRUE if a DS was copied, FALSE if not.
+ *
+ */
+function migration_control_COPY_ONE_DS( $repo, $pid, &$context ) {
+  
+  $find = variable_get( 'mi_copy_old' );
+  $replace = variable_get( 'mi_copy_new' );
+
+  $object = repository_control_fetch( $repo, $pid, '', $context );
+
+  if ( !$object ) {
+    $alias = variable_get( 'icg_tuque_alias', 'Alias Not Set!' );
+    $context['results'][ ] = "Warning! Fedora Object $pid was NOT found or has restricted access in the $alias repository! \n";
+    return;
+    }
+
+  // Got a target object.  Fetch it's title, update the progress message and Go!
+  //
+  $title = ( string ) $object->label;
+  $context['sandbox']['current_pid'] = $pid;
+  $context['message'] = t( 'Processing object @pid. Title = "@title"', array( '@pid' => $pid, '@title' => $title ));
+
+  // Find the target datastream.
+  //
+  $datastream = $object[ $find ];  
+  if ( !isset( $datastream ) || empty( $datastream )) { return FALSE; }
+  $context['results']['matched']++;  
+
+  // Bits of what follows was lifted from
+  // function islandora_copy_object(AbstractObject $object) 
+  // at https://github.com/Islandora/islandora/blob/7.x/islandora.module#L1418-L1447
+  //
+  // MAM - This is necessary to ensure that we don't have to hold copies of 
+  // very large datastreams in memory!
+  //
+  $temp_file = drupal_tempnam( 'temporary://', 'datastream' );      // open a temp file
+  $datastream->getContent( $temp_file );                            // copy DS binary content to the temp file
+  $cG = $datastream->controlGroup;                                  // grab the existing DS controlGroup
+  $new_datastream = $object->constructDatastream( $replace, $cG );  // build a new DS with a new DSID
+  $new_datastream->setContentFromFile( $temp_file );                // set new DS content from the temp file
+  $new_datastream->mimetype = $datastream->mimetype;                // copy DS MIMEtype to new
+  $new_datastream->label = $datastream->label;                      // copy DS label to new
+  $object->ingestDatastream( $new_datastream );                     // save the new DS into the object
+  drupal_unlink( $temp_file );                                      // discard the temp file
+
+  // Update results and inform the batch engine that we are finished with this operation.
+  //    
+  $context['results'][ ] = "--COPY_ONE_DS successfully applied to the $find record of $pid to generate a new $replace datastream. \n";
+  $context['results']['operated']++;
+  repository_control_post( $context );
+  
+}  // end of... function migration_control_COPY_ONE_DS
+
+
+/* -----------------------------------------------------------------------------
+ * migration_control_PROCESS_TIFF( );
+ * 
+ * Function to identify ONE 'image/tif' or 'image/tiff' MIME type DS in the target
+ * object and do the following:
+ * 
+ *   1) Change the DSID to 'OBJ'.
+ *   2) @TODO: Change the RELS-EXT for the new repository schema.
+ * 
+ * Returns TRUE if ONE DS was processed, FALSE if not.
+ *
+ */
+function migration_control_PROCESS_TIFF( $repo, $pid, &$context ) {
+  
+  $object = repository_control_fetch( $repo, $pid, '', $context );
+  if ( !$object ) {
+    $alias = variable_get( 'icg_tuque_alias', 'Alias Not Set!' );
+    $context['results'][ ] = "Warning! Fedora Object $pid was NOT found or has restricted access in the $alias repository! \n";
+    return FALSE;
+    }
+
+  // Got a target object.  Fetch it's title, update the progress message and Go!
+  //
+  $title = ( string ) $object->label;
+  $context['sandbox']['current_pid'] = $pid;
+  $context['message'] = t( 'Processing object @pid. Title = "@title"', array( '@pid' => $pid, '@title' => $title ));
+
+  // If this object already has an OBJ, skip it.
+  //
+  $ds = $object['OBJ'];
+  if ( $ds ) {
+    $context['message'] = "\n--Object '$pid' already has an 'OBJ' datastream.  Skip it!";
+    return FALSE;  
+  }
+  $found = FALSE;
+  
+  // Find ONE image/tif or image/tiff target datastream and copy to 'OBJ'.
+  //
+  foreach ( $object as $ds ) {
+    $mimetype = strtolower( $ds->mimetype );
+    if ( in_array( $mimetype, array( 'image/tif','image/tiff' ))) {
+      $context['results']['matched']++;  
+      $temp_file = drupal_tempnam( 'temporary://', 'tiff' );  // open a temp file
+      $ds->getContent( $temp_file );                          // copy DS binary content to the temp file
+      $cG = $ds->controlGroup;                                // grab the existing DS controlGroup
+      $new_ds = $object->constructDatastream( 'OBJ', $cG );   // build a new DS with a new DSID of OBJ
+      $new_ds->setContentFromFile( $temp_file );              // set new DS content from the temp file
+      $new_ds->mimetype = 'image/tiff';                       // set the new MIMEtype
+      $new_ds->label = $ds->label;                            // copy DS label to new
+      $object->ingestDatastream( $new_ds );                   // save the new DS into the object
+      drupal_unlink( $temp_file );                            // discard the temp file
+      $found = TRUE;
+      break;   // one and done!
+    } 
+  }
+
+  // Update results and inform the batch engine that we are finished with this operation.
+  //    
+  if ( $found ) {
+    $context['results'][ ] = "\n----PROCESS_TIFF successfully applied to one image/tif record ($ds->label) of $pid to produce a new 'OBJ' datastream. \n";
+    $context['results']['operated']++;
+  }
+  repository_control_post( $context );
+  return $found;
+  
+}  // end of... function migration_control_PROCESS_TIFF
+
+/* -----------------------------------------------------------------------------
+ * migration_control_MIGRATE_PAGE( );
+ * 
+ * Function to identify an existing book page and convert datastreams to new format.
+ * 
+ * Notes:  
+ * DC records remain unchanged.  Yea!
+ * There are no MODS.  Yea!
+ * In the RELS-EXT...
+ *   Convert RELS-EXT label to 'Fedora Object to Object Relationship Metadata'
+ *   Change the rdf:RDF node to <rdf:RDF xmlns:fedora="info:fedora/fedora-system:def/relations-external#" xmlns:fedora-model="info:fedora/fedora-system:def/model#" xmlns:islandora="http://islandora.ca/ontology/relsext#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+ *   Add 2 nodes: <islandora:hasLanguage>eng</islandora:hasLanguage>
+ *                <islandora:isPageOf rdf:resource="info:fedora/islandora:108"></islandora:isPageOf>
+ *     Both are children of /rdf:RDF/rdf:Description           ^|^^^^^^^^^|^
+ *                                                              Book Object
+ *   Pull the 'Book Object' from /rdf:RDF/rdf:Description/isMemberOf/@[resource]
+ * We need a new RELS-INT but try derivative creation first?     
+ * Change the DSID of TIFF to OBJ (if OBJ not already done).  
+ * Let derivative recreation take care of the rest?
+ *     
+ * Returns TRUE if a page object was converted, FALSE if not.
+ *
+ */
+function migration_control_MIGRATE_PAGE( $repo, $pid, &$context ) {
+  
+  $object = repository_control_fetch( $repo, $pid, '', $context );
+  if ( !$object ) {
+    $alias = variable_get( 'icg_tuque_alias', 'Alias Not Set!' );
+    $context['results'][ ] = "Warning! Fedora Object $pid was NOT found or has restricted access in the $alias repository! \n";
+    return FALSE;
+    }
+  $found = FALSE;
+
+  // Got a target object.  Fetch it's title, update the progress message and Go!
+  //
+  $title = ( string ) $object->label;
+  $context['sandbox']['current_pid'] = $pid;
+  $context['message'] = t( 'Processing object @pid. Title = "@title"', array( '@pid' => $pid, '@title' => $title ));
+
+  // Check the RELS-EXT of this object for the book page signature Xpath.
+  //
+  $xpath1 = "/rdf:RDF/rdf:Description/*[namespace-uri()='info:fedora/fedora-system:def/relations-external#' and local-name()='isMemberOf']/@*[namespace-uri()='http://www.w3.org/1999/02/22-rdf-syntax-ns#' and local-name()='resource']";
+
+  if ( $node1 = repository_control_xpath( $object, 'RELS-EXT', $xpath1, $context )) {
+    $context['results']['matched']++;  
+    $ds = $object['RELS-EXT'];
+    $ds->forceUpdate = TRUE;
+    $ds->label = "Fedora Object to Object Relationship Metadata";  // Change the RELS-EXT label.  
+    $book = (string) $node1[0];  // This Xpath returns an attribute...$book is the attribute value
+    $xpath2 = "/rdf:RDF/rdf:Description";
+    if ( $node2 = repository_control_xpath( $object, 'RELS-EXT', $xpath2, $context )) {
+      $node2[0]->addChild( 'islandora:hasLanguage', 'eng' );
+      $new = $node2[0]->addChild( 'islandora:isPageOf', $book );
+      $new->addAttribute( 'rdf:resource', $book );
+      $object->ingestDatastream( $ds );
+      $context['results'][ ] = "\n----MIGRATE_PAGE successfully applied to $pid, part of '$book'.";
+      $context['results']['operated']++;
+      $found = TRUE;
+    }
+  }
+  repository_control_post( $context );
+  return $found;
+  
+}  // end of... function migration_control_MIGRATE_PAGE
+
+/* -----------------------------------------------------------------------------
+ * migration_control_MIGRATE_BOOK( );
+ * 
+ * Function to identify an existing book (not just the pages) and convert 
+ * datastreams to new format.
+ * 
+ * Notes:  
+ * In the RELS-EXT...
+ *   Use this Xpath (below) to find the hasModel element and change the 'resource'
+ *   attribute from 'info:fedora/islandora:iaBookCModel' to 'info:fedora/islandora:bookCModel'.
+ *     Xpath = /rdf:RDF/rdf:Description/fedora-model:hasModel/@*[namespace-uri()='http://www.w3.org/1999/02/22-rdf-syntax-ns#' and local-name()='resource']
+ *   Add an element of the form...
+ *     <islandora:inheritXacmlFrom rdf:resource="info:fedora/islandora:bookCollection"></islandora:inheritXacmlFrom>
+ * Let derivative recreation take care of the rest?
+ *     
+ * Returns TRUE if a book object was converted, FALSE if not.
+ * 
+ */
+function migration_control_MIGRATE_BOOK( $repo, $pid, &$context ) {
+  
+  $object = repository_control_fetch( $repo, $pid, '', $context );
+  if ( !$object ) {
+    $alias = variable_get( 'icg_tuque_alias', 'Alias Not Set!' );
+    $context['results'][ ] = "Warning! Fedora Object $pid was NOT found or has restricted access in the $alias repository! \n";
+    return FALSE;
+    }
+  $found = FALSE;
+
+  // Got a target object.  Fetch it's title, update the progress message and Go!
+  //
+  $title = ( string ) $object->label;
+  $context['sandbox']['current_pid'] = $pid;
+  $context['message'] = t( 'Processing object @pid. Title = "@title"', array( '@pid' => $pid, '@title' => $title ));
+
+  // Check the RELS-EXT of this object for the book signature Xpath.
+  //
+  $xpath1 = "/rdf:RDF/rdf:Description/fedora-model:hasModel/@*[namespace-uri()='http://www.w3.org/1999/02/22-rdf-syntax-ns#' and local-name()='resource']";
+
+  if ( $node1 = repository_control_xpath( $object, 'RELS-EXT', $xpath1, $context )) {
+    $hasModel = (string) $node1[0];  // This Xpath returns an attribute...$hasModel is the attribute value
+    if ( $hasModel == 'info:fedora/islandora:iaBookCModel' ) {  // if $hasModel is the old content model...
+      $context['results']['matched']++;  
+      $ds = $object['RELS-EXT'];
+      $ds->forceUpdate = TRUE;
+      $ds->content = str_replace( 'iaBookCModel', 'bookCModel', (string) $ds->content );
+      $xpath2 = "/rdf:RDF/rdf:Description";
+      if ( $node2 = repository_control_xpath( $object, 'RELS-EXT', $xpath2, $context )) {
+        $new = $node2[0]->addChild( 'islandora:inheritXacmlFrom', '' );
+        $new->addAttribute( 'rdf:resource', 'info:fedora/islandora:bookCollection' );
+      }
+      $object->ingestDatastream( $ds );
+      $context['results'][ ] = "\n--First phase MIGRATE_BOOK successfully applied to $pid. ";
+      $context['results']['operated']++;
+      $found = TRUE;
+    } else if ( $hasModel == 'info:fedora/islandora:bookCModel' ) {  // if $hasModel is the new content model...regen derivatives
+      $context['results']['matched']++;  
+//    islandora_islandora_object_ingested( $object );    // Regen all derivatives?
+      islandora_paged_content_aggregate_pdf_derivative( $object );
+
+      $context['results'][ ] = "\n--Second phase MIGRATE_BOOK (derivative regen) successfully applied to $pid. ";
+      $context['results']['operated']++;
+      $found = TRUE;
+    }  
+  }
+  repository_control_post( $context );
+  return $found;
+  
+}  // end of... function migration_control_MIGRATE_BOOK
+
+/* -----------------------------------------------------------------------------
+ * migration_control_op_batch_finished( );
+ * 
+ * Defines the function called at the end of batch processing.
+ * 
+ */
+function migration_control_op_batch_finished( $success, $results, $operations ) {
+
+  $output = '';
+  $total = variable_get( 'mi_total_count' );
+  $num_ops = variable_get( 'mi_operations_count' );
+  
+  // Success!  Do something meaningful with the results.
+  //
+  if ( $success ) {
+    
+    // Grab each of the counters from $results and remove it from the array.
+    //
+    $fetched = ( isset( $results['fetched'] ) ? $results['fetched'] : 0 ); 
+    $matched = ( isset( $results['matched'] ) ? $results['matched'] : 0 ); 
+    $operated = ( isset( $results['operated'] ) ? $results['operated'] : 0 ); 
+    unset( $results['fetched'] ); unset( $results['matched'] );
+    unset( $results['operated'] ); unset( $results['progress'] );
+        
+    foreach ( $results as $msg ) {
+      $output .= $msg;
+    }
+    
+    $summary = "\nmigration_control_op is complete with \n  $total active objects, \n  $fetched fetched, \n  ".
+      "$matched matched, and \n  $operated operations performed. \n";
+    drupal_set_message( $summary );
+    $output .= $summary;
+  
+    // Write the data to the output file.
+    $filename = file_unmanaged_save_data( $output, variable_get( 'mi_output_file' ), FILE_EXISTS_REPLACE );
+    if ( $filename ) {
+      $url = file_create_url( $filename );
+      $_SESSION['migration_control_output_file'] = $filename;
+      drupal_set_message( t( 'Saved file as %filename (accessible via !url, uri=<span id="uri">@uri</span>)', 
+        array( '%filename' => $filename, '@uri' => $filename, '!url' => l(t( 'this URL' ), $url, array( "attributes" => array( "target" => "_blank" ))))));
+    }
+    else 
+      drupal_set_message( 'Failed to save the file', 'error' );
+    
+  // Not successful.  Bummer.
+  //  
+  } else {
+    // An error occurred.
+    // $operations contains the operations that remained unprocessed.
+    $error_operation = reset( $operations );
+    drupal_set_message( t( 'An error occurred while processing @operation with arguments : @args', array( '@operation' => $error_operation[0], '@args' => print_r( $error_operation[0], TRUE ))));
+  }
+}
+
+
+/* -----------------------------------------------------------------------------
+ * Implements hook_menu( ).
+ *
+ * Here we set up the URLs (menu entries) for the module.
+ */
+function migration_control_menu( ) {
+  $items = array( );
+  $items['migration_control'] = array(
+    'title' => 'Migration Control',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array( 'migration_control_main_form' ),
+    'description' => 'Migration Controls',
+    'access arguments' => array( 'administer users' ),
+    'type' => MENU_NORMAL_ITEM,
+  );
+  return $items;
+}  
+
